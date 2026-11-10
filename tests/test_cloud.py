@@ -137,8 +137,8 @@ def test_truncated_http_body_is_a_session_error(monkeypatch: pytest.MonkeyPatch)
         def read(self, *_: object) -> bytes:
             raise IncompleteRead(b"partial")
 
-    monkeypatch.setattr(cloud.urllib.request, "urlopen", lambda *_a, **_k: Truncated())
-    with pytest.raises(CloudSessionError, match="failed"):
+    monkeypatch.setattr(cloud._OPENER, "open", lambda *_a, **_k: Truncated())
+    with pytest.raises(CloudSessionError, match="IncompleteRead"):
         cloud._http_get_json("https://example.invalid/x?sn=1", None, 1.0)
 
 
