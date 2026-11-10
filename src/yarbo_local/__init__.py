@@ -10,6 +10,7 @@ from __future__ import annotations
 from . import payloads
 from .blackbox import FlightRecorder
 from .client import YarboRobot
+from .cloud import CloudBroker, CloudSessionError, CloudTransport, resolve_cloud_broker
 from .exceptions import (
     CommandError,
     CommandRefusedError,
@@ -55,6 +56,9 @@ __all__ = [
     "Barrier",
     "BarrierPoints",
     "ChargingPoint",
+    "CloudBroker",
+    "CloudSessionError",
+    "CloudTransport",
     "Command",
     "CommandError",
     "CommandRefusedError",
@@ -96,4 +100,5 @@ __all__ = [
     "Zone",
     "payloads",
     "resolve",
+    "resolve_cloud_broker",
 ]
