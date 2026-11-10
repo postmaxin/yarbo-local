@@ -50,13 +50,22 @@ class MqttTransport:
         port: int = 1883,
         *,
         tls: bool = False,
+        tls_verify: bool = False,
+        username: str | None = None,
+        password: str | None = None,
         identifier: str | None = None,
         keepalive: int = 30,
         will: tuple[str, bytes] | None = None,
     ) -> None:
+        """``tls_verify`` is for a broker with a real certificate (Yarbo's cloud): it checks the
+        chain and hostname. Left False, a TLS connection keeps the robot's self-signed behaviour.
+        ``username``/``password`` are sent as given, so a password of ``""`` is sent as empty."""
         self.host = host
         self.port = port
         self.tls = tls
+        self.tls_verify = tls_verify
+        self.username = username
+        self._password = password
         self.identifier = identifier or f"yarbo-local-{secrets.token_hex(3)}"
         self.keepalive = keepalive
         self._will = will
@@ -71,15 +80,18 @@ class MqttTransport:
     async def connect(self) -> None:
         ctx: ssl.SSLContext | None = None
         if self.tls:
-            # The robot presents EMQX's stock self-signed sample certificate.
-            # This gives encryption, not authentication; see the findings.
             ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            if not self.tls_verify:
+                # The robot presents EMQX's stock self-signed sample certificate.
+                # This gives encryption, not authentication; see the findings.
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
         will = aiomqtt.Will(self._will[0], self._will[1], retain=True) if self._will else None
         client = aiomqtt.Client(
             self.host,
             port=self.port,
+            username=self.username,
+            password=self._password,
             identifier=self.identifier,
             keepalive=self.keepalive,
             tls_context=ctx,
