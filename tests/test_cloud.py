@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from http.client import IncompleteRead
 import json
 from pathlib import Path
 import ssl
@@ -83,10 +84,48 @@ def test_legacy_broker_uses_jwt_as_username_and_empty_password(tmp_path: Path) -
     assert broker.migrated is False
 
 
-def test_repr_never_shows_the_token(tmp_path: Path) -> None:
+@pytest.mark.parametrize("migrated", [True, False])
+def test_repr_never_shows_the_token(tmp_path: Path, migrated: bool) -> None:
+    # legacy puts the token in `username`, new puts it in `password`
     token = jwt(NOW + 86400)
-    broker = resolve_cloud_broker(write_session(tmp_path, token), SN, http_get=FakeHttp(), now=NOW)
+    http = FakeHttp(migrated=migrated)
+    broker = resolve_cloud_broker(write_session(tmp_path, token), SN, http_get=http, now=NOW)
     assert token not in repr(broker)
+    assert token not in str(broker)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"success": True, "data": None},
+        {"success": True, "data": {}},
+        {"success": True},
+        {"success": True, "data": {"migrated": "yes"}},
+        {"success": True, "data": {"migrated": None}},
+    ],
+)
+def test_missing_or_malformed_routing_decision_is_an_error(
+    tmp_path: Path, query: dict[str, Any]
+) -> None:
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    with pytest.raises(CloudSessionError, match="migrated"):
+        resolve_cloud_broker(path, SN, http_get=FakeHttp(query=query), now=NOW)
+
+
+def test_truncated_http_body_is_a_session_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Truncated:
+        def __enter__(self) -> Truncated:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self, *_: object) -> bytes:
+            raise IncompleteRead(b"partial")
+
+    monkeypatch.setattr(cloud.urllib.request, "urlopen", lambda *_a, **_k: Truncated())
+    with pytest.raises(CloudSessionError, match="failed"):
+        cloud._http_get_json("https://example.invalid/x?sn=1", None, 1.0)
 
 
 def test_expired_token_is_refused_without_any_request(tmp_path: Path) -> None:

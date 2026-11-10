@@ -21,6 +21,7 @@ import asyncio
 import base64
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from http.client import HTTPException
 import json
 from pathlib import Path
 import secrets
@@ -54,12 +55,13 @@ class CloudSessionError(YarboError):
 
 @dataclass(frozen=True, slots=True)
 class CloudBroker:
-    """Where to connect and as whom. The password is a bearer token: it is not in ``repr``."""
+    """Where to connect and as whom. Either credential can be the bearer token (the legacy
+    broker takes it as the username), so neither is in ``repr``."""
 
     host: str
     port: int
     tls: bool
-    username: str
+    username: str = field(repr=False)
     password: str = field(repr=False)
     client_id: str
     migrated: bool
@@ -90,7 +92,7 @@ def _http_get_json(url: str, headers: dict[str, str] | None, timeout: float) -> 
         raise CloudSessionError(
             f"GET {url.split('?', maxsplit=1)[0]} returned HTTP {err.code}"
         ) from err
-    except (OSError, ValueError) as err:
+    except (OSError, ValueError, HTTPException) as err:  # incl. a truncated (IncompleteRead) body
         raise CloudSessionError(f"GET {url.split('?', maxsplit=1)[0]} failed: {err}") from err
     if not isinstance(body, dict):
         raise CloudSessionError(f"GET {url.split('?', maxsplit=1)[0]} returned a non-object body")
@@ -155,7 +157,12 @@ def resolve_cloud_broker(
         raise CloudSessionError(
             f"the migration query was rejected: code={reply.get('code')} msg={reply.get('message')}"
         )
-    migrated = bool((reply.get("data") or {}).get("migrated", False))
+    data = reply.get("data")
+    migrated = data.get("migrated") if isinstance(data, dict) else None
+    if not isinstance(migrated, bool):
+        # No routing answer is not "legacy": a migrated robot publishes only on the new
+        # broker, so guessing would connect to the wrong one and hear nothing.
+        raise CloudSessionError("the migration query returned no boolean 'migrated' decision")
     rand4 = f"{secrets.randbelow(10000):04d}"
     if migrated:
         return CloudBroker(
