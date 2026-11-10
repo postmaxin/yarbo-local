@@ -112,6 +112,18 @@ def test_missing_or_malformed_routing_decision_is_an_error(
         resolve_cloud_broker(path, SN, http_get=FakeHttp(query=query), now=NOW)
 
 
+@pytest.mark.parametrize("migrated", [True, False])
+@pytest.mark.parametrize("port", ["abc", [1], 70000])
+def test_bad_port_in_the_config_is_a_session_error(
+    tmp_path: Path, migrated: bool, port: Any
+) -> None:
+    http = FakeHttp(migrated=migrated)
+    http.cfg |= {"new_mqtt_port": port, "mqtt_port": port}
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    with pytest.raises(CloudSessionError, match="port"):
+        resolve_cloud_broker(path, SN, http_get=http, now=NOW)
+
+
 def test_truncated_http_body_is_a_session_error(monkeypatch: pytest.MonkeyPatch) -> None:
     class Truncated:
         def __enter__(self) -> Truncated:

@@ -127,6 +127,17 @@ def read_session(path: str | Path, *, now: float | None = None) -> tuple[str, st
     return username, token
 
 
+def _port(value: Any) -> int:
+    """A port from Yarbo's config, or CloudSessionError (so the session retries, not crashes)."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as err:
+        raise CloudSessionError(f"Yarbo's config has a non-numeric MQTT port: {value!r}") from err
+    if not 0 < port < 65536:
+        raise CloudSessionError(f"Yarbo's config has an out-of-range MQTT port: {port}")
+    return port
+
+
 def resolve_cloud_broker(
     session_file: str | Path,
     serial: str,
@@ -167,7 +178,7 @@ def resolve_cloud_broker(
     if migrated:
         return CloudBroker(
             host=str(cfg.get("new_mqtt_host") or NEW_MQTT_HOST),
-            port=int(cfg.get("new_mqtt_port") or NEW_MQTT_PORT),
+            port=_port(cfg.get("new_mqtt_port") or NEW_MQTT_PORT),
             tls=bool(cfg.get("new_mqtt_use_tls", True)),
             username=username,
             password=token,
@@ -181,7 +192,7 @@ def resolve_cloud_broker(
     use_tls = cfg.get("mqtt_use_tls")
     return CloudBroker(
         host=str(host),
-        port=int(port),
+        port=_port(port),
         tls=True if use_tls is None else bool(use_tls),
         username=token,
         password="",
