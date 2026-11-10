@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 from http.client import IncompleteRead
+import http.server
 import json
 from pathlib import Path
 import ssl
+import threading
 import time
 from typing import Any, ClassVar
 
@@ -264,3 +266,93 @@ async def test_cloud_transport_turns_resolution_failure_into_connection_lost(
         await t.connect()
     assert aio.instances == []
     assert not t.connected
+
+
+# -- hardening -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["new_mqtt_use_tls", "mqtt_use_tls"])
+def test_plaintext_broker_is_refused(tmp_path: Path, key: str) -> None:
+    http = FakeHttp(migrated=key == "new_mqtt_use_tls")
+    http.cfg |= {key: False}
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    with pytest.raises(CloudSessionError, match="plaintext"):
+        resolve_cloud_broker(path, SN, http_get=http, now=NOW)
+
+
+@pytest.mark.parametrize("migrated", [True, False])
+def test_null_tls_means_tls_not_plaintext(tmp_path: Path, migrated: bool) -> None:
+    http = FakeHttp(migrated=migrated)
+    http.cfg |= {"new_mqtt_use_tls": None, "mqtt_use_tls": None}
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    assert resolve_cloud_broker(path, SN, http_get=http, now=NOW).tls is True
+
+
+def test_non_https_migration_url_is_refused_before_the_token_is_sent(tmp_path: Path) -> None:
+    http = FakeHttp()
+    http.cfg |= {"emqx_migration_query_url": "http://evil.example/query"}
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    with pytest.raises(CloudSessionError, match="non-https"):
+        resolve_cloud_broker(path, SN, http_get=http, now=NOW)
+    assert len(http.calls) == 1  # only the config fetch; no request carried the token
+
+
+def test_non_https_api_base_is_refused(tmp_path: Path) -> None:
+    path = write_session(tmp_path, jwt(NOW + 9999))
+    with pytest.raises(CloudSessionError, match="non-https"):
+        resolve_cloud_broker(path, SN, api_base="http://x.example", http_get=FakeHttp(), now=NOW)
+
+
+async def test_malformed_url_becomes_connection_lost(
+    aio: type[FakeAioClient], tmp_path: Path
+) -> None:
+    http = FakeHttp()
+    http.cfg |= {"emqx_migration_query_url": "https://[bad"}
+    t = CloudTransport(write_session(tmp_path, jwt(time.time() + 9999)), SN, http_get=http)
+    with pytest.raises(ConnectionLostError):
+        await t.connect()
+
+
+def test_malformed_url_in_the_default_fetcher(tmp_path: Path) -> None:
+    with pytest.raises(CloudSessionError):
+        cloud._http_get_json("https://[bad", None, 1.0)
+
+
+def test_redirects_are_not_followed() -> None:
+    seen: list[str] = []
+
+    class Target(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_: object) -> None:
+            return None
+
+    target = http.server.HTTPServer(("127.0.0.1", 0), Target)
+
+    class Redirector(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/leak")
+            self.end_headers()
+
+        def log_message(self, *_: object) -> None:
+            return None
+
+    redirector = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (target, redirector)]
+    for th in threads:
+        th.start()
+    try:
+        request = cloud.urllib.request.Request(
+            f"http://127.0.0.1:{redirector.server_port}/", headers={"Authorization": "Bearer x"}
+        )
+        with pytest.raises(cloud.urllib.error.HTTPError) as exc:
+            cloud._OPENER.open(request, timeout=5)
+        assert exc.value.code == 302
+    finally:
+        target.shutdown()
+        redirector.shutdown()
+    assert seen == []

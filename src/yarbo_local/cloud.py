@@ -81,10 +81,30 @@ class CloudBroker:
         )
 
 
-def _http_get_json(url: str, headers: dict[str, str] | None, timeout: float) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers=headers or {})  # noqa: S310  (https URLs only)
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib copies the Authorization header to a redirect target; never follow one."""
+
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _require_https(url: str) -> None:
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        scheme = urllib.parse.urlsplit(url).scheme
+    except ValueError as err:
+        raise CloudSessionError(f"malformed URL: {err}") from err
+    if scheme != "https":
+        raise CloudSessionError(f"refusing a non-https URL: {url.split('?', maxsplit=1)[0]}")
+
+
+def _http_get_json(url: str, headers: dict[str, str] | None, timeout: float) -> dict[str, Any]:
+    try:
+        _require_https(url)
+        request = urllib.request.Request(url, headers=headers or {})  # noqa: S310  (https only)
+        with _OPENER.open(request, timeout=timeout) as response:
             body = json.load(response)
     except urllib.error.HTTPError as err:
         if err.code == 401:
@@ -138,6 +158,13 @@ def _port(value: Any) -> int:
     return port
 
 
+def _tls(value: Any) -> bool:
+    """Missing/null means TLS (the default). False is refused: the password is a bearer token."""
+    if value is None or value is True:
+        return True
+    raise CloudSessionError("Yarbo's config asks for a plaintext MQTT connection; refusing")
+
+
 def resolve_cloud_broker(
     session_file: str | Path,
     serial: str,
@@ -155,9 +182,12 @@ def resolve_cloud_broker(
     """
     get = http_get or _http_get_json
     username, token = read_session(session_file, now=now)
-    cfg = get(api_base.rstrip("/") + CONFIG_PATH, None, timeout)
+    config_url = api_base.rstrip("/") + CONFIG_PATH
+    _require_https(config_url)
+    cfg = get(config_url, None, timeout)
     cfg = cfg["data"] if isinstance(cfg.get("data"), dict) else cfg
     query_url = str(cfg.get("emqx_migration_query_url") or MIGRATION_QUERY_URL)
+    _require_https(query_url)  # the token goes in this request's header
     sep = "&" if "?" in query_url else "?"
     reply = get(
         f"{query_url}{sep}{urllib.parse.urlencode({'sn': serial})}",
@@ -179,7 +209,7 @@ def resolve_cloud_broker(
         return CloudBroker(
             host=str(cfg.get("new_mqtt_host") or NEW_MQTT_HOST),
             port=_port(cfg.get("new_mqtt_port") or NEW_MQTT_PORT),
-            tls=bool(cfg.get("new_mqtt_use_tls", True)),
+            tls=_tls(cfg.get("new_mqtt_use_tls")),
             username=username,
             password=token,
             client_id=f"{CLIENT_ID_PREFIX}{username.lower()}_{rand4}",
@@ -189,11 +219,10 @@ def resolve_cloud_broker(
     port = cfg.get("mqtt_port")
     if not host or not port:
         raise CloudSessionError("Yarbo's config names no legacy broker (mqtt_host/mqtt_port)")
-    use_tls = cfg.get("mqtt_use_tls")
     return CloudBroker(
         host=str(host),
         port=_port(port),
-        tls=True if use_tls is None else bool(use_tls),
+        tls=_tls(cfg.get("mqtt_use_tls")),
         username=token,
         password="",
         client_id=f"{CLIENT_ID_PREFIX}{username.lower()}_{int(time.time())}_{rand4}",
